@@ -704,4 +704,125 @@ additional rows.
 
 ## Phase 4 — Dashboard (backend API + frontend)
 
-*(not started yet)*
+### Step 1: DRF API for `Application`
+
+`applications/serializers.py` — `ApplicationSerializer` flattens the
+useful bits of the related `JobListing` (`job_title`, `company`,
+`job_url`, `ats_type`) onto the `Application` response via
+`source='job_listing.title'` etc., so the frontend gets one flat object
+per row instead of having to make a second request. Every field except
+`status` and `cover_letter` is read-only — a client can update the
+status (from a dropdown) or edit the cover letter, but can't tamper with
+`match_score` or fabricate a different job listing.
+
+`applications/views.py` — `ApplicationViewSet`, restricted to
+`get`/`patch`/`head` (Applications are created by the matching task, not
+by users directly — no `post`/`delete`). `get_queryset()` scopes to
+`request.user` and supports `?status=` filtering via a query param.
+
+`applications/urls.py` wired into `config/urls.py` under `/api/`.
+
+### Step 2: Token auth + CORS
+
+Session authentication (DRF's other default) requires CSRF token
+handling, which is real friction for a separate React SPA making
+cross-origin requests — and full login (Google via django-allauth) is
+still a later phase. Added **token authentication** instead:
+
+- `'rest_framework.authtoken'` in `INSTALLED_APPS` (migrated — creates
+  the token table).
+- `REST_FRAMEWORK.DEFAULT_AUTHENTICATION_CLASSES` now lists
+  `TokenAuthentication` first, keeping `SessionAuthentication` +
+  `BasicAuthentication` too (so the admin panel and `curl -u` testing
+  still work unchanged).
+- Generated a token for `testuser` via `Token.objects.get_or_create()`.
+  The frontend sends it as `Authorization: Token <key>`.
+
+Also added `django-cors-headers` (`corsheaders` in `INSTALLED_APPS`,
+`CorsMiddleware` early in `MIDDLEWARE`) with `CORS_ALLOWED_ORIGINS`
+defaulting to `http://localhost:5173` (Vite's dev port) — without this,
+the browser blocks the frontend's requests to the API entirely since
+they're on different origins (`5173` vs `8000`).
+
+Verified via `curl` with `Authorization: Token ...`: listing, `?status=`
+filtering, and `PATCH` all work; confirmed read-only fields (tried
+setting `match_score` to `999` via PATCH) are silently ignored while
+`status` still updates.
+
+### Step 3: React + Vite + Tailwind frontend
+
+```bash
+npm create vite@latest frontend -- --template react
+cd frontend && npm install
+npm install -D tailwindcss @tailwindcss/vite
+```
+
+Tailwind v4 configuration is CSS-based (no `tailwind.config.js` needed)
+— `@tailwindcss/vite` plugin added to `vite.config.js`, and
+`src/index.css` defines the design tokens as an `@theme` block:
+
+```css
+@theme {
+  --font-display: 'Space Grotesk', sans-serif;
+  --font-body: 'Public Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --color-bg: #faf9f7;
+  --color-accent: #1f6f54;
+  --color-amber: #a9762c;
+  --color-rust: #c4746a;
+  /* ...etc, matching the mockup's design direction */
+}
+```
+
+Tailwind v4 auto-generates utility classes from `--color-*`/`--font-*`
+theme variables (e.g. `--color-accent` → `bg-accent`, `text-accent`,
+`border-accent`), so components just use `bg-accent` etc. directly.
+
+**`src/api.js`** — a thin fetch wrapper. `VITE_API_URL` and
+`VITE_API_TOKEN` come from `frontend/.env` (git-ignored;
+`frontend/.env.example` has the template). The token is a stopgap for
+local dev — once real login exists, this gets replaced with a proper
+session/OAuth flow instead of a hardcoded token.
+
+**`src/components/PipelineTrail.jsx`** — the signature element from the
+design mockup: a 5-dot trail (found → matched → letter ready → applied →
+response) instead of a generic status badge. A config map translates
+each `Application.status` value into how many dots are "done" (green),
+which one is "current" (amber, or rust if `rejected`), and the label text
+underneath.
+
+**`src/components/ApplicationRow.jsx`** — one row per application: title,
+company, the pipeline trail, match score + tier label, date, a status
+dropdown (PATCHes on change), an "Open" link to the job posting, and a
+"letter" toggle that expands an inline view of the match rationale plus
+an editable cover letter textarea with a "Save letter" button (disabled
+until the text actually changes).
+
+**`src/App.jsx`** — the dashboard shell: header with live stats (found /
+pending / applied / interview, computed from the loaded applications),
+filter tabs that re-fetch with `?status=`, and the row list.
+
+### Step 4: Browser-verified end to end
+
+Started the Django dev server and the Vite dev server together, then
+drove a real headless Chromium (Playwright) against the running frontend
+— not just "it compiles," an actual rendered page hitting the real API:
+
+- Dashboard loaded with 3 real `Application` rows from earlier phases —
+  correct scores, correct pipeline-trail stage per status, zero console
+  errors, zero failed network requests.
+- Expanded the cover letter panel on a row — rationale and editable
+  letter text rendered correctly, "Save letter" correctly disabled with
+  no unsaved changes.
+- Changed a row's status via the dropdown (`cover_letter_ready` →
+  `interview`) — confirmed the `PATCH` round-tripped and the UI updated
+  live: pipeline trail advanced to "interview scheduled," and the header
+  stats recalculated (interview 0→1, pending 2→1) without a page reload.
+
+Screenshots confirmed the visual direction matches the mockup: warm
+off-white background, green/amber/rust dot trail, JetBrains Mono for
+numeric data, black pill buttons.
+
+**Not done yet:** deployment (backend → Railway, frontend → Vercel) —
+holding off since it means creating real cloud resources under your
+accounts, which needs your go-ahead first.
