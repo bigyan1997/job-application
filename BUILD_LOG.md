@@ -423,4 +423,159 @@ end to end.
 
 ## Phase 2 — Job search
 
+### Step 1: `JobSearchProfile` + `JobListing` models
+
+`job_search/models.py`:
+
+```python
+class JobSearchProfile(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='job_search_profiles')
+    target_role = models.CharField(max_length=255)
+    location = models.CharField(max_length=255, blank=True)
+    country = models.CharField(max_length=2, default='AU')
+    keywords = ArrayField(models.CharField(max_length=100), default=list, blank=True)
+    auto_apply_enabled = models.BooleanField(default=False)
+    search_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class JobListing(models.Model):
+    class AtsType(models.TextChoices):
+        GREENHOUSE = 'greenhouse', 'Greenhouse'
+        LEVER = 'lever', 'Lever'
+        OTHER = 'other', 'Other'
+
+    title = models.CharField(max_length=255)
+    company = models.CharField(max_length=255, blank=True)
+    location = models.CharField(max_length=255, blank=True)
+    description = models.TextField(blank=True)
+    url = models.URLField(max_length=1000, unique=True)
+    source = models.CharField(max_length=50)
+    ats_type = models.CharField(max_length=10, choices=AtsType.choices, default=AtsType.OTHER)
+    posted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+```
+
+- `JobSearchProfile.keywords` uses Postgres's `ArrayField` — a native array
+  column — rather than a separate `Keyword` model or a comma-joined
+  string. Simpler for a small, unordered list of terms.
+- `JobListing` has **no FK to `JobSearchProfile`** — it's a shared pool of
+  raw postings, deduped globally on `url` (a DB-level `unique=True`
+  constraint backs up the `get_or_create` dedup in the task). The same
+  posting found by two different users' searches is stored once. Later
+  phases (matching) will score each listing against each user's resume
+  independently — the listing itself doesn't "belong" to a search.
+- `ArrayField` requires `'django.contrib.postgres'` in `INSTALLED_APPS` —
+  without it, Django's system check fails with `postgres.E005`.
+
+```bash
+python manage.py makemigrations job_search
+python manage.py migrate
+```
+
+Registered both models in `job_search/admin.py` for inspection via
+`/admin/`.
+
+### Step 2: Adzuna integration
+
+`job_search/services/adzuna.py` — `search_adzuna(target_role, location, country)`
+hits Adzuna's real search API (`GET /v1/api/jobs/{country}/search/1`) with
+`app_id`/`app_key` from settings, and normalizes each result into the
+common shape (`title`, `company`, `location`, `description`, `url`,
+`source`, `posted_at`) that the task expects from every source.
+
+Added `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` to `settings.py` (read from
+`.env`, same pattern as the Anthropic key). Verified with a real call
+against `Sydney` / `software developer` — 20 relevant AU results.
+
+### Step 3: RemoteOK integration
+
+`job_search/services/remoteok.py` — RemoteOK's public feed
+(`GET /api`) has no server-side search; it returns a rotating snapshot of
+~100 listings that has to be filtered client-side.
+
+**First version matched against both job title and tags** — this produced
+false positives: several listings on the free feed are tag-stuffed with
+30-40+ generic/unrelated tags (looks like spam or bad scraping on
+RemoteOK's end), so a single stray tag like `python` showed up on
+completely unrelated postings ("Deputy Manager Sales HR", a French tutor
+listing). Tried tightening it to "only trust short tag lists" first — that
+didn't fully fix it either, since junk tags weren't confined to long
+lists. **Settled on matching against the job title only** — the one field
+that's actually reliable on this feed. Verified: searching `'engineer'`
+returned 3 clean, genuinely relevant results with zero junk.
+
+Note for later: this free/unauthenticated feed only returns a rotating
+~100-listing snapshot, not a searchable archive — a query with no live
+matches in the current snapshot returns 0 results, which is expected
+behavior, not a bug.
+
+### Step 4: Celery Beat task + dedup
+
+`job_search/utils.py` — `detect_ats_type(url)`, a plain substring check:
+`greenhouse.io` → `greenhouse`, `lever.co` → `lever`, else `other`.
+
+`job_search/tasks.py`:
+
+```python
+def search_jobs_for_profile(profile: JobSearchProfile) -> int:
+    listings = search_adzuna(...) + search_remoteok(...)
+    created_count = 0
+    for item in listings:
+        _, created = JobListing.objects.get_or_create(
+            url=item['url'],
+            defaults={..., 'ats_type': detect_ats_type(item['url']), ...},
+        )
+        if created:
+            created_count += 1
+    return created_count
+
+@shared_task
+def search_jobs():
+    for profile in JobSearchProfile.objects.filter(search_active=True):
+        search_jobs_for_profile(profile)
+```
+
+`get_or_create(url=...)` is the dedup mechanism — the DB-level `unique=True`
+on `JobListing.url` backs it up so a race between two workers can't create
+duplicates either.
+
+Added to `settings.py` — this is what makes `search_jobs` actually run
+automatically every 24 hours once Celery Beat is running, instead of only
+ever running when called manually:
+
+```python
+CELERY_BEAT_SCHEDULE = {
+    'search-jobs-every-24-hours': {
+        'task': 'job_search.tasks.search_jobs',
+        'schedule': 60 * 60 * 24,
+    },
+}
+```
+
+### Step 5: End-to-end test
+
+Created a real `JobSearchProfile` (`software developer`, Sydney, AU,
+keywords `[python, django]`) and ran `search_jobs()` directly:
+
+- **First run:** 20 new `JobListing` rows created (all `ats_type: other`
+  — Adzuna's redirect URLs aren't direct ATS links).
+- **Rerun:** 5 new rows created, not 0 — this is real-world API variance
+  (Adzuna's live/sponsored results shift slightly between calls), not a
+  dedup failure.
+- To prove the dedup logic itself is correct independent of live API
+  noise, ran `search_jobs_for_profile()` twice with the Adzuna/RemoteOK
+  calls mocked to return the exact same fixed listing (a fake
+  `boards.greenhouse.io` URL): **first call created 1 row, second call
+  created 0** — confirmed only one row exists for that URL.
+- Same test confirmed `ats_type` detection end to end: the mocked
+  `greenhouse.io` URL was correctly tagged `ats_type: greenhouse`.
+  Spot-checked `lever.co` → `lever` and a plain `adzuna.com.au` URL →
+  `other` directly against `detect_ats_type()` as well.
+
+---
+
+## Phase 3 — Matching + cover letters
+
 *(not started yet)*

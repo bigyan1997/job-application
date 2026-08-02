@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.postgres',
     'rest_framework',
     'resumes',
     'job_search',
@@ -148,6 +149,20 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+
+# search_jobs runs once every 24 hours for every active JobSearchProfile.
+CELERY_BEAT_SCHEDULE = {
+    'search-jobs-every-24-hours': {
+        'task': 'job_search.tasks.search_jobs',
+        'schedule': 60 * 60 * 24,
+    },
+}
+
+
+# Job search sources
+
+ADZUNA_APP_ID = env('ADZUNA_APP_ID', default='')
+ADZUNA_APP_KEY = env('ADZUNA_APP_KEY', default='')
 
 
 # Claude API
