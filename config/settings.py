@@ -134,6 +134,10 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# Local disk for now; swapped for Cloudinary storage in a later phase.
+MEDIA_URL = 'media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
 
 # Celery
 # https://docs.celeryq.dev/en/stable/userguide/configuration.html

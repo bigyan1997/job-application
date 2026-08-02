@@ -274,4 +274,153 @@ confirmed working end to end.
 
 ## Phase 1 — Resume parsing
 
+### Step 1: `Resume` model + migration
+
+`resumes/models.py`:
+
+```python
+class Resume(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        PARSED = 'parsed', 'Parsed'
+        FAILED = 'failed', 'Failed'
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='resumes')
+    file = models.FileField(upload_to='resumes/')
+    original_filename = models.CharField(max_length=255)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    parsed_data = models.JSONField(null=True, blank=True)
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+```
+
+- `user` FK matches the architecture doc's "User → many Resume" relationship.
+- `status` tracks where the resume is in the pipeline (`pending` right
+  after upload → `parsed` once Claude returns structured data, or `failed`
+  if that call errors) — the frontend/API can poll this instead of the
+  upload response having to block on the Claude call.
+- `parsed_data` is a Postgres `JSONField` — the structured output from
+  Claude (skills, titles, years of experience, achievements) lands here
+  as-is, no separate columns per field.
+- `error_message` captures why parsing failed, for debugging/display.
+
+Added `MEDIA_URL` / `MEDIA_ROOT` to `settings.py` so uploaded files have
+somewhere to land locally (plain disk storage for now — the architecture
+doc calls for Cloudinary storage, which is a later swap, not needed to get
+the pipeline working end to end).
+
+```bash
+python manage.py makemigrations resumes
+python manage.py migrate
+```
+
+### Step 2: Claude parsing service + Celery task
+
+Split into two files, matching the app-structure diagram in the
+architecture doc:
+
+**`resumes/services/claude_parser.py`** — the actual Claude call. Rather
+than extracting text from the PDF ourselves (a separate parsing library,
+one more thing that can go wrong), the file is sent to Claude directly as
+a `document` content block (base64-encoded) when it's a PDF — Claude reads
+PDFs natively. Plain-text resumes are decoded and sent as a text block
+instead, since the `document` block type is specifically for PDFs.
+
+The extraction uses **structured outputs** (`output_config.format` with a
+JSON schema) rather than a "please respond only with JSON" prompt — this
+guarantees the response is valid, schema-conforming JSON instead of hoping
+the model doesn't wrap it in markdown or add commentary:
+
+```python
+RESUME_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'skills': {'type': 'array', 'items': {'type': 'string'}},
+        'titles': {'type': 'array', 'items': {'type': 'string'}},
+        'years_experience': {'type': 'number'},
+        'achievements': {'type': 'array', 'items': {'type': 'string'}},
+    },
+    'required': ['skills', 'titles', 'years_experience', 'achievements'],
+    'additionalProperties': False,
+}
+```
+
+`parse_resume_file(file_bytes, filename)` builds the right content blocks,
+calls `create_message()` from `core/claude_client.py` with that schema,
+and returns the parsed dict — matches the JSON shape from the original
+project notes exactly (skills, titles, years_experience, achievements).
+
+**`resumes/tasks.py`** — the Celery task wrapping that service call:
+
+```python
+@shared_task
+def parse_resume(resume_id):
+    resume = Resume.objects.get(id=resume_id)
+    try:
+        with resume.file.open('rb') as f:
+            file_bytes = f.read()
+        resume.parsed_data = parse_resume_file(file_bytes, resume.original_filename)
+        resume.status = Resume.Status.PARSED
+        resume.save(update_fields=['parsed_data', 'status', 'updated_at'])
+    except Exception as exc:
+        resume.status = Resume.Status.FAILED
+        resume.error_message = str(exc)
+        resume.save(update_fields=['status', 'error_message', 'updated_at'])
+        raise
+```
+
+Runs as a background job (not inline in the request) because the Claude
+call takes a few seconds — the upload endpoint returns immediately with
+`status: pending`, and the frontend polls or refetches until it flips to
+`parsed`.
+
+### Step 3: Upload endpoint (DRF)
+
+- `resumes/serializers.py` — `ResumeSerializer`, a `ModelSerializer` with
+  `status`, `parsed_data`, `error_message`, and `created_at` marked
+  read-only (client only ever supplies `file`).
+- `resumes/views.py` — `ResumeViewSet`, a `ModelViewSet` restricted to
+  `get`/`post`/`head`. `get_queryset()` scopes results to
+  `request.user`'s own resumes. `perform_create()` sets `user` and
+  `original_filename` from the request, saves the row, then kicks off the
+  background task: `parse_resume.delay(resume.id)`.
+- `resumes/urls.py` — a DRF `DefaultRouter` registered at `/resumes/`.
+- Wired into `config/urls.py` under `/api/`, plus a dev-only static route
+  for serving uploaded files (`MEDIA_URL`/`MEDIA_ROOT`, `DEBUG`-gated).
+
+Auth: `IsAuthenticated` permission — DRF's default authentication classes
+(session + HTTP Basic) work out of the box, no extra config needed yet.
+Real login (Google via django-allauth) is a later phase; for now, a
+superuser account is enough to test against.
+
+### Step 4: End-to-end test
+
+Created a test superuser and a plain-text sample resume, started the
+Celery worker and dev server, and drove the whole pipeline with `curl`:
+
+```bash
+curl -u testuser:testpass123 -X POST http://127.0.0.1:8000/api/resumes/ \
+  -F "file=@sample_resume.txt"
+# → {"status": "pending", "parsed_data": null, ...}
+
+# a few seconds later:
+curl -u testuser:testpass123 http://127.0.0.1:8000/api/resumes/1/
+# → {"status": "parsed", "parsed_data": {
+#      "skills": ["Python", "Django", "React", "PostgreSQL", "Celery", "Docker", "Git", "REST APIs"],
+#      "titles": ["Software Developer", "Junior Developer"],
+#      "achievements": [...],
+#      "years_experience": 4
+#    }, ...}
+```
+
+Worker log confirmed the real API call: `POST
+https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"`, task succeeded
+in ~5s. Upload → background parse → structured JSON confirmed working
+end to end.
+
+---
+
+## Phase 2 — Job search
+
 *(not started yet)*
