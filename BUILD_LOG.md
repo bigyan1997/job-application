@@ -578,4 +578,130 @@ keywords `[python, django]`) and ran `search_jobs()` directly:
 
 ## Phase 3 — Matching + cover letters
 
+### Step 1: `Application` model
+
+`applications/models.py`:
+
+```python
+class Application(models.Model):
+    class Status(models.TextChoices):
+        COVER_LETTER_READY = 'cover_letter_ready', 'Cover letter ready'
+        MANUAL_PENDING = 'manual_pending', 'Manual pending'
+        AUTO_APPLIED = 'auto_applied', 'Auto applied'
+        APPLIED = 'applied', 'Applied'
+        INTERVIEW = 'interview', 'Interview'
+        REJECTED = 'rejected', 'Rejected'
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='applications')
+    job_listing = models.ForeignKey(JobListing, on_delete=models.CASCADE, related_name='applications')
+    resume = models.ForeignKey(Resume, on_delete=models.CASCADE, related_name='applications')
+    match_score = models.PositiveSmallIntegerField(validators=[MinValueValidator(0), MaxValueValidator(100)])
+    match_rationale = models.TextField()
+    cover_letter = models.TextField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.COVER_LETTER_READY)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['user', 'job_listing']
+```
+
+- Default `status` is `cover_letter_ready` — matches the architecture
+  doc's data flow exactly: an `Application` row only comes into existence
+  *after* scoring + cover letter generation succeed, not before.
+- `unique_together = ['user', 'job_listing']` enforces "one Application
+  per user per job" at the database level — the `JobListing ←→
+  Application is one-to-many per user` relationship from the notes.
+
+```bash
+python manage.py makemigrations applications
+python manage.py migrate
+```
+
+### Step 2: Claude matcher service
+
+`matching/services/claude_matcher.py` — two independent functions, one
+per Claude call (matches the architecture doc's two separate call types:
+match scoring and cover letter generation).
+
+**`score_match(resume_data, job_description)`** — structured output again
+(`output_config.format` + a `{score, rationale}` JSON schema), same
+reasoning as the resume parser: guarantees valid, parseable JSON instead
+of hoping the model's prose-wrapped answer parses cleanly. Score is
+clamped to `0-100` after parsing as a safety net.
+
+**`generate_cover_letter(resume_data, job_description, company_name)`** —
+plain text response, no schema (a cover letter is prose, not structured
+data). Prompt explicitly says not to invent experience the candidate
+doesn't have, to avoid placeholder brackets like `[Company Name]`, and to
+keep it under 350 words.
+
+### Step 3: The Celery task
+
+`matching/tasks.py`:
+
+```python
+@shared_task
+def score_and_generate_cover_letter(resume_id, job_listing_id):
+    resume = Resume.objects.get(id=resume_id)
+    job_listing = JobListing.objects.get(id=job_listing_id)
+
+    if Application.objects.filter(user=resume.user, job_listing=job_listing).exists():
+        return None
+
+    match_result = score_match(resume.parsed_data, job_listing.description)
+    cover_letter = generate_cover_letter(resume.parsed_data, job_listing.description, job_listing.company)
+
+    return Application.objects.create(
+        user=resume.user,
+        job_listing=job_listing,
+        resume=resume,
+        match_score=match_result['score'],
+        match_rationale=match_result['rationale'],
+        cover_letter=cover_letter,
+    ).id
+```
+
+The existence check before doing any Claude calls is a belt-and-suspenders
+guard on top of the DB-level `unique_together` constraint — avoids paying
+for two API calls just to hit an integrity error on save.
+
+### Step 4: End-to-end test
+
+Ran the task directly (not via `.delay()`, for immediate feedback) against
+3 real `JobListing` rows from the Phase 2 Adzuna test data, using the
+parsed resume from Phase 1:
+
+| Job | Score | Why |
+|---|---|---|
+| Software Developer @ Home | 82 | Skills/experience overlap is strong |
+| Software Development Intern @ Study and Work | 25 | Correctly flagged as overqualified for an entry-level program |
+| Software Development Engineer @ Amazon | 25 | Description was actually AWS *Infrastructure Services* (hardware/ops), not general dev — scored on the real description content, not just the generic title |
+
+Scores were directionally sound in all three cases, including correctly
+penalizing a title/description mismatch rather than pattern-matching on
+the job title alone. Cover letters were professional, cited the
+candidate's actual achievements (the PHP→Django migration, the API
+optimization) without inventing anything, and stayed close to the
+350-word ceiling.
+
+**One data-quality finding:** the first test run produced a rationale
+string with garbled trailing characters baked into the JSON string value
+itself (`...slightly limits a perfect match."}}}{ `) — still technically
+valid JSON (it parsed fine), just corrupted prose inside the field.
+Reproducing the exact same call immediately after came back clean, so
+this reads as an occasional model-output anomaly rather than a bug in the
+parsing code — structured outputs guarantee valid *JSON*, not that every
+string field's content is always clean. Not building defensive
+sanitization around a single non-reproducible occurrence; noting it here
+in case it recurs.
+
+Also confirmed the task's own dedup guard: calling it a second time for
+the same `(resume, job_listing)` pair returned `None` and created zero
+additional rows.
+
+---
+
+## Phase 4 — Dashboard (backend API + frontend)
+
 *(not started yet)*
