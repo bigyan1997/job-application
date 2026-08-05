@@ -192,3 +192,10 @@ ADZUNA_APP_KEY = env('ADZUNA_APP_KEY', default='')
 # so there's one place (settings) that owns where config comes from.
 
 ANTHROPIC_API_KEY = env('ANTHROPIC_API_KEY', default='')
+
+
+# Google login
+# accounts/views.py verifies the ID token the frontend gets from Google
+# Identity Services against this client ID.
+
+GOOGLE_CLIENT_ID = env('GOOGLE_CLIENT_ID', default='')

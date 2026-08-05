@@ -1154,3 +1154,106 @@ Vite were running, with no Celery worker to actually process the parse
 job sitting in the Redis queue. Started the worker; both drained and
 parsed successfully (~10s each) with no data loss — they'd been queued
 correctly the whole time, just waiting for a consumer.
+
+---
+
+## Phase 5 — Real authentication (Google + email/password)
+
+Replaced the hardcoded dev token with actual login. Frontend and backend
+are separate origins (`:5173` / `:8000`), which rules out the "vanilla"
+django-allauth flow the original notes named — that's built around
+server-rendered redirects and session cookies, which means fighting
+cross-origin cookie/CSRF config for no real benefit here. Went with a
+different, simpler shape instead (confirmed with you before building):
+**Google Identity Services on the frontend + a verification endpoint on
+the backend that mints one of our existing DRF tokens** — reuses the
+token-auth plumbing that was already there instead of introducing a
+second auth mechanism.
+
+### Backend — `accounts` app
+
+Plain package (no models — just Django's built-in `User` +
+`rest_framework.authtoken.Token`, same reasoning as `core`/`auto_apply`
+earlier: no models means no reason for the full `startapp` scaffold).
+
+**`POST /api/auth/google/`** — takes `{credential}` (the ID token
+Google's JS SDK hands the frontend), verifies it server-side against
+Google's public keys via the `google-auth` library
+(`id_token.verify_oauth2_token(credential, google_requests.Request(),
+settings.GOOGLE_CLIENT_ID)` — the audience check against
+`GOOGLE_CLIENT_ID` is what stops someone handing us a token meant for a
+*different* app), then `get_or_create`s a `User` keyed on email as the
+username. First-time Google sign-ins get `set_unusable_password()`
+explicitly — makes it impossible to password-guess into a Google-only
+account later.
+
+**`POST /api/auth/register/`** and **`POST /api/auth/login/`** — added
+after you asked for a normal email/password option alongside Google.
+`register` runs the password through Django's built-in
+`validate_password()` (rejects short/common/all-numeric passwords —
+confirmed with a real 400 response body listing all three reasons) and
+409s on a duplicate email. `login` uses `django.contrib.auth.authenticate()`
+directly — works out of the box against `username=email` with the
+default `ModelBackend`, no custom backend needed.
+
+All three converge on one `_token_response(user)` helper —
+`Token.objects.get_or_create(user=user)`, return `{token, email, name}`.
+Same response shape regardless of which of the three ways the user signed
+in, so the frontend doesn't care which one was used.
+
+### Frontend
+
+`api.js` — the static `VITE_API_TOKEN` env var is gone. `authToken` is
+now a module-level variable seeded from `localStorage`, with
+`setAuthToken()` / `getAuthToken()` to read and update it (and
+`localStorage`) together. Also improved `request()`'s error handling
+while here: failed requests now surface the backend's actual `{detail:
+"..."}` message instead of a bare status code — needed so the login
+form can show *why* a sign-in failed instead of a generic error.
+
+`src/context/AuthContext.jsx` — a small React context wrapping the token
+store so components re-render on login/logout (the module-level variable
+in `api.js` alone doesn't trigger React re-renders). `login(token, user)`
+commits both the token and a `{email, name}` object to state +
+`localStorage`; `logout()` clears both.
+
+`src/pages/Login.jsx` — one page, two paths: an email/password form
+(toggles between sign-in and sign-up copy/fields) and Google's official
+button below an "or" divider. Both paths converge on the same
+`AuthContext.login()` call once the backend responds.
+
+`App.jsx` — wrapped in `GoogleOAuthProvider` (needs
+`VITE_GOOGLE_CLIENT_ID`, same client ID as the backend's — the ID token
+audience has to match on both ends) and `AuthProvider`. Renders `Login`
+when not authenticated, the real router (Dashboard/Setup/TopNav)
+otherwise — no separate "protected route" wrapper needed since the
+whole app sits behind one `isAuthenticated` check at the top.
+
+`TopNav.jsx` — shows the signed-in user's email and a "Sign out" button
+when logged in.
+
+### Browser-tested end to end
+
+- **Backend, directly**: register → 200 with token; duplicate email →
+  400; login with correct password → same token as register; wrong
+  password → 401; weak password (`"123"`) → 400 with Django's real
+  validator messages.
+- **Frontend, in a real browser**: signed up with a fresh email/password
+  (`Browser Test User` / `browsertest@example.com`) → landed on the
+  Dashboard, TopNav correctly showed the new email, correctly showed 0
+  applications (proper per-user data isolation — the real account has
+  20). Signed out → back to the login screen. Signed back in with the
+  same credentials → back on the Dashboard. Zero console errors on any
+  step.
+- **Google button**: renders as Google's real official button (their
+  actual iframe, not a mock) once `GOOGLE_CLIENT_ID` was wired in on
+  both ends. Clicking it currently fails with `GSI_LOGGER: The given
+  origin is not allowed for the given client ID` — expected, not a bug:
+  the Google Cloud Console OAuth client needs `http://localhost:5173`
+  added under **Authorized JavaScript origins** before Google will
+  actually complete a sign-in from the dev server. That's a one-time
+  step only doable from your Google Cloud Console account.
+
+Cleaned up test users (`smoketest@example.com`, `weakpass@example.com`,
+`browsertest@example.com`) after verification — none of this is real
+account data.

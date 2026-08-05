@@ -1,12 +1,50 @@
 const API_URL = import.meta.env.VITE_API_URL
-const API_TOKEN = import.meta.env.VITE_API_TOKEN
+
+let authToken = localStorage.getItem('auth_token') || ''
+
+export function setAuthToken(token) {
+  authToken = token || ''
+  if (token) {
+    localStorage.setItem('auth_token', token)
+  } else {
+    localStorage.removeItem('auth_token')
+  }
+}
+
+export function getAuthToken() {
+  return authToken
+}
+
+export function googleLogin(credential) {
+  return request('/auth/google/', {
+    method: 'POST',
+    body: JSON.stringify({ credential }),
+    skipAuth: true,
+  })
+}
+
+export function signInWithPassword(email, password) {
+  return request('/auth/login/', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+    skipAuth: true,
+  })
+}
+
+export function signUpWithPassword(email, password, name) {
+  return request('/auth/register/', {
+    method: 'POST',
+    body: JSON.stringify({ email, password, name }),
+    skipAuth: true,
+  })
+}
 
 async function request(path, options = {}) {
   const isFormData = options.body instanceof FormData
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
     headers: {
-      Authorization: `Token ${API_TOKEN}`,
+      ...(options.skipAuth ? {} : { Authorization: `Token ${authToken}` }),
       // Don't set Content-Type for FormData — the browser needs to add
       // its own multipart boundary, which a manual header would clobber.
       ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
@@ -14,7 +52,8 @@ async function request(path, options = {}) {
     },
   })
   if (!response.ok) {
-    throw new Error(`${options.method || 'GET'} ${path} failed: ${response.status}`)
+    const body = await response.json().catch(() => null)
+    throw new Error(body?.detail || `${options.method || 'GET'} ${path} failed: ${response.status}`)
   }
   return response.status === 204 ? null : response.json()
 }
