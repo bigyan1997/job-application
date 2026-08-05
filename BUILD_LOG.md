@@ -1112,3 +1112,45 @@ from Adzuna, which returns `adzuna.com.au` redirect URLs, `ats_type:
 other`). Same checks repeated by driving the actual dropdowns in a
 browser — sort and min-score filter both produced the exact same
 results as the direct API calls, zero console errors.
+
+---
+
+## Phase 4f — "Last crawled" indicator
+
+The original mockup's dashboard header had a `last search 3h ago` meta
+line that never got built. Rather than fabricate it from an indirect
+signal (e.g. the newest `JobListing.created_at`, which only reflects
+when something *new* was found — a search that ran but found nothing new
+would look like it never ran), added a real field for it.
+
+`job_search/models.py` — `JobSearchProfile.last_searched_at`
+(nullable `DateTimeField`). `job_search/tasks.py` —
+`search_jobs_for_profile()` stamps it with `timezone.now()` at the very
+end, after the search + dedup + matching-dispatch all complete without
+error — so it reflects a finished run, not an attempted one. Exposed as
+read-only on `JobSearchProfileSerializer`.
+
+Added `frontend/src/utils/time.js` — a small `timeAgo(isoString)` helper
+(`"just now"` / `"Xm ago"` / `"Xh ago"` / `"Xd ago"`), shared by both
+places that needed it:
+
+- **Setup page**: the "Search active" toggle's subtext now reads `Runs
+  every 24 hours · last crawled Xh ago` (or `not yet crawled` before the
+  first run) instead of just the static schedule text.
+- **Dashboard header**: now shows `{target_role} · {location} · last
+  search Xh ago`, matching the original mockup line for line — replacing
+  the static "Job Application Automation" placeholder subtitle.
+
+**Verified:** ran `search_jobs()` for real, confirmed
+`last_searched_at` populated in the DB, then confirmed both pages
+render it correctly in a browser — Dashboard header read `"Python
+Developer · Sydney · last search just now"`, Setup page read `"Runs
+every 24 hours · last crawled just now"`. Zero console errors.
+
+**Also found and fixed in passing:** two real resume uploads
+(`Bigyan_resume.pdf`, `Bina Resume.pdf`) were stuck in `pending` —
+you'd uploaded them live against the dev server while only Django and
+Vite were running, with no Celery worker to actually process the parse
+job sitting in the Redis queue. Started the worker; both drained and
+parsed successfully (~10s each) with no data loss — they'd been queued
+correctly the whole time, just waiting for a consumer.

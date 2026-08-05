@@ -7,6 +7,7 @@ import {
   createJobSearchProfile,
   updateJobSearchProfile,
 } from '../api'
+import { timeAgo } from '../utils/time'
 
 export default function Setup() {
   return (
@@ -160,6 +161,7 @@ function SearchProfilePanel() {
   const [keywordInput, setKeywordInput] = useState('')
   const [autoApplyEnabled, setAutoApplyEnabled] = useState(false)
   const [searchActive, setSearchActive] = useState(true)
+  const [lastSearchedAt, setLastSearchedAt] = useState(null)
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState(null)
 
@@ -173,6 +175,7 @@ function SearchProfilePanel() {
       setKeywords(p.keywords)
       setAutoApplyEnabled(p.auto_apply_enabled)
       setSearchActive(p.search_active)
+      setLastSearchedAt(p.last_searched_at)
     })
   }, [])
 
@@ -264,7 +267,7 @@ function SearchProfilePanel() {
       />
       <ToggleRow
         label="Search active"
-        sub="Runs every 24 hours"
+        sub={`Runs every 24 hours · ${lastSearchedAt ? `last crawled ${timeAgo(lastSearchedAt)}` : 'not yet crawled'}`}
         checked={searchActive}
         onChange={setSearchActive}
       />

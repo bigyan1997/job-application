@@ -15,6 +15,7 @@ class JobSearchProfile(models.Model):
     keywords = ArrayField(models.CharField(max_length=100), default=list, blank=True)
     auto_apply_enabled = models.BooleanField(default=False)
     search_active = models.BooleanField(default=True)
+    last_searched_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

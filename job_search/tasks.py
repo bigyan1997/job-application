@@ -1,4 +1,5 @@
 from celery import shared_task
+from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from matching.tasks import score_and_generate_cover_letter
@@ -59,6 +60,11 @@ def search_jobs_for_profile(profile: JobSearchProfile) -> int:
     if resume:
         for listing_id in touched_listing_ids:
             score_and_generate_cover_letter.delay(resume.id, listing_id)
+
+    # Stamped only once the search actually completes, so "last crawled"
+    # reflects a real finished run — not attempted, not partial.
+    profile.last_searched_at = timezone.now()
+    profile.save(update_fields=['last_searched_at'])
 
     return created_count
 

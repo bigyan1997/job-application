@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
-import { listApplications, updateApplication, regenerateCoverLetter } from '../api'
+import { listApplications, updateApplication, regenerateCoverLetter, listJobSearchProfiles } from '../api'
 import ApplicationRow from '../components/ApplicationRow'
+import { timeAgo } from '../utils/time'
 
 const TABS = [
   { key: '', label: 'All' },
@@ -48,6 +49,7 @@ export default function Dashboard() {
   const [atsType, setAtsType] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [profile, setProfile] = useState(null)
 
   const load = useCallback(async (filters) => {
     setLoading(true)
@@ -65,6 +67,10 @@ export default function Dashboard() {
   useEffect(() => {
     load({ status: activeTab, ordering: sortBy, minScore, atsType })
   }, [activeTab, sortBy, minScore, atsType, load])
+
+  useEffect(() => {
+    listJobSearchProfiles().then((profiles) => setProfile(profiles[0] ?? null))
+  }, [])
 
   async function handleUpdate(id, fields) {
     const updated = await updateApplication(id, fields)
@@ -85,7 +91,18 @@ export default function Dashboard() {
       <header className="mb-10 flex items-start justify-between border-b border-line pb-6">
         <div>
           <h1 className="font-display text-xl font-semibold tracking-tight">Application Tracker</h1>
-          <div className="mt-1.5 text-[13px] text-ink-dim">Job Application Automation</div>
+          <div className="mt-1.5 text-[13px] text-ink-dim">
+            {profile ? (
+              <>
+                <span className="font-medium text-ink">{profile.target_role}</span>
+                {profile.location && <>&nbsp;·&nbsp;{profile.location}</>}
+                &nbsp;·&nbsp;
+                {profile.last_searched_at ? `last search ${timeAgo(profile.last_searched_at)}` : 'not yet searched'}
+              </>
+            ) : (
+              'Job Application Automation'
+            )}
+          </div>
         </div>
         <div className="flex gap-8">
           <Stat value={stats.found} label="found" />
