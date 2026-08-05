@@ -19,9 +19,14 @@ async function request(path, options = {}) {
   return response.status === 204 ? null : response.json()
 }
 
-export function listApplications(status) {
-  const query = status ? `?status=${encodeURIComponent(status)}` : ''
-  return request(`/applications/${query}`)
+export function listApplications({ status, ordering, minScore, atsType } = {}) {
+  const params = new URLSearchParams()
+  if (status) params.set('status', status)
+  if (ordering) params.set('ordering', ordering)
+  if (minScore) params.set('min_score', minScore)
+  if (atsType) params.set('ats_type', atsType)
+  const query = params.toString()
+  return request(`/applications/${query ? `?${query}` : ''}`)
 }
 
 export function updateApplication(id, fields) {

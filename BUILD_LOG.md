@@ -1067,3 +1067,48 @@ letter text actually changed, the new text incorporated the instruction
 (verified programmatically, not just visually), and the sign-off still
 correctly showed the real name/email/phone after the rewrite. Zero
 console errors.
+
+---
+
+## Phase 4e — Dashboard filters: sort, min score, ATS type
+
+Requested: filter by match score and by date found. Suggested adding an
+`ats_type` filter alongside it (Greenhouse/Lever are the only auto-apply
+candidates, so it's directly useful) — confirmed before building.
+
+Landed on **sort + threshold together** rather than picking one: a sort
+dropdown (newest/oldest, highest/lowest match) covers "order by date" and
+"order by score," and a separate minimum-score dropdown covers "only show
+me the good ones" — different needs, so both stayed.
+
+### Backend
+
+`applications/views.py` — added DRF's built-in `OrderingFilter`
+(`ordering_fields = ['match_score', 'created_at']`, default
+`ordering = ['-created_at']`) rather than hand-rolling sort-direction
+parsing — it already handles the `?ordering=-match_score` /
+`?ordering=match_score` convention correctly. Added two more manual
+filters in `get_queryset()` alongside the existing `status` one:
+`min_score` (`match_score__gte`) and `ats_type`
+(`job_listing__ats_type`).
+
+### Frontend
+
+`api.js` — `listApplications()` now takes an options object
+(`{status, ordering, minScore, atsType}`) instead of a bare status
+string, building the query string from whichever are set.
+
+`Dashboard.jsx` — three new `<select>` controls next to the existing
+status tabs (sort, min score, ATS source), each driving a query param;
+changing any of them re-fetches. Stats header recalculates from
+whatever's currently loaded, so it reflects the filtered set, not the
+full unfiltered total.
+
+**Verified both at the API and through the UI:** `?ordering=-match_score`
+returned scores in correct descending order; `?min_score=60` correctly
+returned only the 2 matching rows; `?ats_type=greenhouse` correctly
+returned 0 (no Greenhouse-hosted listings in the current test data — all
+from Adzuna, which returns `adzuna.com.au` redirect URLs, `ats_type:
+other`). Same checks repeated by driving the actual dropdowns in a
+browser — sort and min-score filter both produced the exact same
+results as the direct API calls, zero console errors.

@@ -1,4 +1,4 @@
-from rest_framework import mixins, permissions, viewsets
+from rest_framework import filters, mixins, permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
@@ -21,15 +21,26 @@ class ApplicationViewSet(
     serializer_class = ApplicationSerializer
     permission_classes = [permissions.IsAuthenticated]
     http_method_names = ['get', 'patch', 'post', 'head']
+    filter_backends = [filters.OrderingFilter]
+    ordering_fields = ['match_score', 'created_at']
+    ordering = ['-created_at']
 
     def get_queryset(self):
         queryset = Application.objects.filter(
             user=self.request.user,
-        ).select_related('job_listing', 'resume').order_by('-created_at')
+        ).select_related('job_listing', 'resume')
 
         status_param = self.request.query_params.get('status')
         if status_param:
             queryset = queryset.filter(status=status_param)
+
+        min_score = self.request.query_params.get('min_score')
+        if min_score:
+            queryset = queryset.filter(match_score__gte=min_score)
+
+        ats_type = self.request.query_params.get('ats_type')
+        if ats_type:
+            queryset = queryset.filter(job_listing__ats_type=ats_type)
 
         return queryset
 

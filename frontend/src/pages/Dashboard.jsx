@@ -10,6 +10,27 @@ const TABS = [
   { key: 'rejected', label: 'Rejected' },
 ]
 
+const SORT_OPTIONS = [
+  { value: '-created_at', label: 'Newest first' },
+  { value: 'created_at', label: 'Oldest first' },
+  { value: '-match_score', label: 'Highest match' },
+  { value: 'match_score', label: 'Lowest match' },
+]
+
+const MIN_SCORE_OPTIONS = [
+  { value: '', label: 'Any score' },
+  { value: '80', label: '80%+' },
+  { value: '60', label: '60%+' },
+  { value: '40', label: '40%+' },
+]
+
+const ATS_TYPE_OPTIONS = [
+  { value: '', label: 'All sources' },
+  { value: 'greenhouse', label: 'Greenhouse' },
+  { value: 'lever', label: 'Lever' },
+  { value: 'other', label: 'Other' },
+]
+
 function computeStats(applications) {
   return {
     found: applications.length,
@@ -22,14 +43,17 @@ function computeStats(applications) {
 export default function Dashboard() {
   const [applications, setApplications] = useState([])
   const [activeTab, setActiveTab] = useState('')
+  const [sortBy, setSortBy] = useState('-created_at')
+  const [minScore, setMinScore] = useState('')
+  const [atsType, setAtsType] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  const load = useCallback(async (status) => {
+  const load = useCallback(async (filters) => {
     setLoading(true)
     setError(null)
     try {
-      const data = await listApplications(status)
+      const data = await listApplications(filters)
       setApplications(data)
     } catch (err) {
       setError(err.message)
@@ -39,8 +63,8 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
-    load(activeTab)
-  }, [activeTab, load])
+    load({ status: activeTab, ordering: sortBy, minScore, atsType })
+  }, [activeTab, sortBy, minScore, atsType, load])
 
   async function handleUpdate(id, fields) {
     const updated = await updateApplication(id, fields)
@@ -71,22 +95,30 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <nav className="mb-5 flex gap-6">
-        {TABS.map((tab) => (
-          <button
-            key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
-            className={
-              'border-b-2 pb-2 text-[13px] ' +
-              (activeTab === tab.key
-                ? 'border-accent font-medium text-ink'
-                : 'border-transparent text-ink-dim hover:text-ink')
-            }
-          >
-            {tab.label}
-          </button>
-        ))}
-      </nav>
+      <div className="mb-5 flex items-center justify-between">
+        <nav className="flex gap-6">
+          {TABS.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={
+                'border-b-2 pb-2 text-[13px] ' +
+                (activeTab === tab.key
+                  ? 'border-accent font-medium text-ink'
+                  : 'border-transparent text-ink-dim hover:text-ink')
+              }
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="flex gap-2">
+          <FilterSelect value={sortBy} onChange={setSortBy} options={SORT_OPTIONS} />
+          <FilterSelect value={minScore} onChange={setMinScore} options={MIN_SCORE_OPTIONS} />
+          <FilterSelect value={atsType} onChange={setAtsType} options={ATS_TYPE_OPTIONS} />
+        </div>
+      </div>
 
       {error && <div className="mb-4 rounded border border-rust bg-rust-soft p-3 text-sm text-rust">{error}</div>}
 
@@ -107,6 +139,22 @@ export default function Dashboard() {
         </div>
       )}
     </div>
+  )
+}
+
+function FilterSelect({ value, onChange, options }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="rounded border border-line bg-surface px-2 py-1.5 font-mono text-[11px] text-ink-dim"
+    >
+      {options.map((opt) => (
+        <option key={opt.value} value={opt.value}>
+          {opt.label}
+        </option>
+      ))}
+    </select>
   )
 }
 
