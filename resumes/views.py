@@ -11,7 +11,7 @@ class ResumeViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'head']
 
     def get_queryset(self):
-        return Resume.objects.filter(user=self.request.user)
+        return Resume.objects.filter(user=self.request.user).order_by('-created_at')
 
     def perform_create(self, serializer):
         resume = serializer.save(

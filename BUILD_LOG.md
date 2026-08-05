@@ -826,3 +826,169 @@ numeric data, black pill buttons.
 **Not done yet:** deployment (backend → Railway, frontend → Vercel) —
 holding off since it means creating real cloud resources under your
 accounts, which needs your go-ahead first.
+
+---
+
+## Phase 4b — Setup screen (resume upload + search profile)
+
+The mockups included a second screen (resume upload + search profile
+form) that the Phase 4 checklist didn't explicitly call out — went back
+and built it.
+
+### Step 1: `JobSearchProfile` DRF API
+
+Same shape as `Application`'s: `job_search/serializers.py`
+(`JobSearchProfileSerializer`), `job_search/views.py`
+(`JobSearchProfileViewSet`, scoped to `request.user`, `perform_create`
+sets `user`), `job_search/urls.py`. Wired into `config/urls.py`.
+
+**Bug caught during this work:** `resumes/views.py`'s `get_queryset()` had
+no `order_by()`, so "the user's resume" (`resumes[0]` on the frontend)
+was actually the *oldest* uploaded resume, not the latest — a new upload
+would silently never show up as current. Fixed with
+`.order_by('-created_at')`.
+
+### Step 2: Setup page (resume upload + profile form)
+
+`frontend/src/pages/Setup.jsx` — two panels matching the mockup:
+
+- **Resume panel** — upload button (no drag-and-drop, click-to-select
+  only, for reliability), a status badge (`parsing…` / `parsed` /
+  `failed`) that polls `GET /resumes/{id}/` every 2s while `pending`,
+  and once parsed, chips for detected roles, skills, and years of
+  experience — reusing the same `parsed_data` shape from Phase 1.
+- **Search profile panel** — target role, location, a keyword tag input
+  (add on Enter, remove with ×), auto-apply and search-active toggles,
+  and a Save button. On save: `PATCH` if a profile already exists,
+  `POST` if not.
+- Deliberately did **not** fabricate the mockup's "next search runs in
+  Xh Ym" countdown — there's no real data source for it (Celery Beat's
+  internal schedule isn't exposed via the API), so the toggle's subtext
+  just says "Runs every 24 hours," which is true, instead of a fake
+  countdown.
+
+Added `react-router-dom` and a `TopNav` component (Tracker / Setup links)
+so `App.jsx` is now a router shell instead of directly rendering the
+dashboard.
+
+Extended `frontend/src/api.js` with resume and job-search-profile calls,
+including a `uploadResume()` that sends `FormData` — had to make the
+shared `request()` helper skip setting `Content-Type` for `FormData`
+bodies, since a manually-set `Content-Type: application/json` would
+clobber the multipart boundary the browser needs to add itself.
+
+### Step 3: Browser-verified — and a real mistake caught mid-test
+
+Drove the Setup page with headless Chromium as before. Partway through,
+noticed the "before" screenshot showed data I hadn't entered — a resume
+called `Bigyan_Karki_Resume.pdf` with real, specific skills (Stripe
+integration, JWT auth, Google Gemini API, etc.), and a job search profile
+with `target_role: "Django Pythin Developer"` (a plausible real typo, not
+something a test script would produce).
+
+**What had happened:** the Django + Vite dev servers from testing were
+still running and reachable at `localhost`, and it looks like you opened
+the Setup page yourself and tried it out with your real resume while I
+was mid-test. My test script's synthetic resume upload (`resume2.txt`,
+fake "Jamie Chen" data) landed with a *later* timestamp than your real
+upload, so — combined with the `order_by` fix above — my fake resume
+briefly became "the current resume" instead of yours. I'd also reset
+`target_role` twice while debugging what I thought was a display bug,
+which overwrote what you'd actually typed.
+
+**What was and wasn't affected:** your actual `Resume` row (id 3) and its
+parsed data were never touched — only which resume the frontend treated
+as "current," and the `JobSearchProfile.target_role` field. Fixed by:
+deleting the synthetic test resume rows, and restoring `target_role` to
+`"Django Pythin Developer"` — the exact value visible in the first
+screenshot before I touched anything, rather than silently correcting
+the likely typo.
+
+**Side effect:** deleting my old Phase 1 test resume (id 1) cascaded
+(`on_delete=CASCADE`) and removed the 3 `Application` rows from Phase 3's
+test matching run, since they referenced it via FK. That was my own
+demo data, not anything of yours — but it means the Dashboard will show
+empty until matching is re-run against a real `JobListing` + your resume.
+
+Re-verified with a final screenshot after cleanup: real resume showing
+as `parsed` with correct chips, search profile showing the restored,
+correct values, zero data loss on anything real.
+
+**Lesson for next time:** a locally-running dev server is reachable by
+anyone with the URL, including the user, while automated testing is in
+progress — worth checking for concurrent real usage before resetting or
+overwriting "test" data that might not be mine.
+
+---
+
+## Phase 4c — Wiring search → matching together automatically
+
+After the Setup screen shipped, walked through what actually happens
+when you click "Save & Start Searching" — and the honest answer was
+"nothing yet." Saving the profile only writes it to the database.
+Nothing was listening for it: Celery Beat wasn't running, and even when
+it is, `search_jobs` finding a new listing never triggered matching —
+that only ever happened when I ran it manually during testing. Fixed the
+second half of that gap.
+
+### The fix
+
+`job_search/tasks.py` — `search_jobs_for_profile()` now dispatches
+`matching.tasks.score_and_generate_cover_letter` for every listing the
+search touches (new **or** already-known from a different user's
+search), using the profile owner's most recently parsed resume:
+
+```python
+resume = Resume.objects.filter(
+    user=profile.user, status=Resume.Status.PARSED,
+).order_by('-created_at').first()
+
+if resume:
+    for listing_id in touched_listing_ids:
+        score_and_generate_cover_letter.delay(resume.id, listing_id)
+```
+
+Deliberately **not** just dispatching for newly-*created* listings: since
+`JobListing` dedup is global (not per-user), a listing already discovered
+by one user's search would otherwise never get matched against a
+*different* user's resume when their search independently finds the same
+posting. Firing for every touched listing and relying on
+`score_and_generate_cover_letter`'s existing internal existence check
+(added back in Phase 3) to no-op cheaply for already-matched pairs is
+simpler and correct for both cases — no wasted Claude calls, since that
+check happens before either API call.
+
+### Real-world debugging along the way
+
+Ran the corrected pipeline against your actual saved profile
+(`target_role: "Django Pythin Developer"`) and got **zero** results from
+both Adzuna and RemoteOK. Traced it to the typo, fixed it — still zero.
+Dug into Adzuna's raw API response directly and found `count: 0`, a
+genuine result, not an error. Tested narrower vs. broader queries against
+the real API:
+
+| Query | Adzuna result count |
+|---|---|
+| `"Django Python Developer"` | 0 |
+| `"Django Developer"` | 1 |
+| `"Python Developer"` | 83 |
+
+**Finding:** Adzuna's `what` parameter ANDs every word together — a
+compound multi-technology target role narrows the search to almost
+nothing. Settled on `"Python Developer"` for a working demo (your call,
+not something I picked silently).
+
+### Confirmed working, fully automatically
+
+Re-ran `search_jobs()` — 20 new listings created, and the worker log
+showed 20 `matching.tasks.score_and_generate_cover_letter` tasks fire
+**on their own**, no manual dispatch. All 20 succeeded, creating real
+`Application` rows scored against your actual resume — sensible
+variation (Senior Backend Engineer / Python roles scoring 62–68, a Cyber
+Security or 3D Geometry role scoring 8–15). Screenshotted the Dashboard
+showing all 20 real results.
+
+This closes the loop: once Celery Beat is running continuously (still
+not started in this dev session — needs `celery -A config beat` alongside
+the worker), the 24-hour cycle described in the architecture doc is now
+actually wired end to end, not just individually-tested pieces.
