@@ -4,20 +4,25 @@ import json
 from core.claude_client import create_message
 
 PROMPT = (
-    'Extract this resume into structured data: the skills mentioned, '
-    'past job titles held, total years of professional experience '
-    '(as a number), and key achievements.'
+    'Extract this resume into structured data: the candidate\'s full '
+    'name, email address, phone number (empty string for any of these '
+    'three not present in the resume), the skills mentioned, past job '
+    'titles held, total years of professional experience (as a number), '
+    'and key achievements.'
 )
 
 RESUME_SCHEMA = {
     'type': 'object',
     'properties': {
+        'name': {'type': 'string'},
+        'email': {'type': 'string'},
+        'phone': {'type': 'string'},
         'skills': {'type': 'array', 'items': {'type': 'string'}},
         'titles': {'type': 'array', 'items': {'type': 'string'}},
         'years_experience': {'type': 'number'},
         'achievements': {'type': 'array', 'items': {'type': 'string'}},
     },
-    'required': ['skills', 'titles', 'years_experience', 'achievements'],
+    'required': ['name', 'email', 'phone', 'skills', 'titles', 'years_experience', 'achievements'],
     'additionalProperties': False,
 }
 

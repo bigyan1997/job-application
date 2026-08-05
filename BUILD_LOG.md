@@ -992,3 +992,78 @@ This closes the loop: once Celery Beat is running continuously (still
 not started in this dev session — needs `celery -A config beat` alongside
 the worker), the 24-hour cycle described in the architecture doc is now
 actually wired end to end, not just individually-tested pieces.
+
+---
+
+## Phase 4d — Real sign-off + regenerate-with-instructions
+
+Two requested fixes to cover letter generation: the closing was a
+`[Candidate Name]` placeholder instead of the real person, and there was
+no way to ask for a revision without hand-editing the text yourself.
+
+### Real name/email/phone in the sign-off
+
+The resume parser never extracted contact details in the first place —
+`RESUME_SCHEMA` only had `skills`/`titles`/`years_experience`/
+`achievements`. Added `name`, `email`, `phone` as required string fields
+(instructed to return `""` when a resume doesn't list one, rather than
+inventing something).
+
+`matching/services/claude_matcher.py` gained a `_contact_instruction()`
+helper, shared by both cover-letter functions, that turns whatever
+contact fields are actually present into an explicit prompt instruction:
+sign off with the real name/email/phone verbatim, or — if none are on
+file — just `"Sincerely,"` with nothing invented after it. This replaces
+the old free-floating "don't use placeholder brackets" instruction, which
+was general enough that the model filled the gap with `[Candidate Name]`
+anyway.
+
+Re-parsed the real resume with the updated schema and regenerated a
+cover letter to confirm the fix — the sign-off now reads:
+
+```
+Sincerely,
+Bigyan Karki
+karkibigyan05@gmail.com
+0430 556 905
+```
+
+Existing `Resume` rows won't have `name`/`email`/`phone` in their
+`parsed_data` until re-parsed (schema changes don't retroactively apply)
+— not a problem going forward since every new upload gets the new
+fields, but worth knowing if older parsed resumes are still in a
+database somewhere.
+
+### Regenerate with instructions
+
+`matching/services/claude_matcher.py` — new `regenerate_cover_letter()`,
+sibling to `generate_cover_letter()`: takes the existing letter text plus
+free-text instructions from the candidate, and asks Claude to revise
+(not rewrite from scratch) while staying grounded in the real resume
+data and keeping the same contact-info sign-off rules.
+
+`applications/views.py` — `ApplicationViewSet` is now composed from DRF
+mixins (`ListModelMixin`, `RetrieveModelMixin`, `UpdateModelMixin` +
+`GenericViewSet`) instead of `ModelViewSet`, specifically so there's no
+`create`/`destroy` at all — safer than relying on `http_method_names` to
+block POST, since a custom `@action` on this endpoint needs `'post'` in
+that list anyway (it's checked at Django's `View.dispatch()` before
+routing even happens). Added `@action(detail=True, methods=['post'])
+regenerate_cover_letter` — validates `instructions` is non-empty, calls
+the service function, saves, returns the updated `Application`.
+
+Frontend: `api.js` gained `regenerateCoverLetter(id, instructions)`.
+`Dashboard.jsx` owns the call (mirroring the existing `handleUpdate`
+pattern) and passes `onRegenerate` down. `ApplicationRow.jsx` — a new
+"Regenerate with instructions" section below the existing cover-letter
+textarea: a small input for what to change, a button (disabled until
+something's typed), and on success the textarea updates with the new
+text and the instructions field clears.
+
+**Browser-tested end to end:** expanded a real application's cover
+letter, typed an instruction ("mention that I'm comfortable working in a
+fully remote, async-first team"), clicked Regenerate — confirmed the
+letter text actually changed, the new text incorporated the instruction
+(verified programmatically, not just visually), and the sign-off still
+correctly showed the real name/email/phone after the rewrite. Zero
+console errors.

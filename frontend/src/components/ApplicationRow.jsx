@@ -17,10 +17,12 @@ function scoreTier(score) {
   return 'weak match'
 }
 
-export default function ApplicationRow({ application, onUpdate }) {
+export default function ApplicationRow({ application, onUpdate, onRegenerate }) {
   const [expanded, setExpanded] = useState(false)
   const [draftLetter, setDraftLetter] = useState(application.cover_letter)
   const [saving, setSaving] = useState(false)
+  const [instructions, setInstructions] = useState('')
+  const [regenerating, setRegenerating] = useState(false)
 
   async function handleStatusChange(e) {
     await onUpdate(application.id, { status: e.target.value })
@@ -32,6 +34,17 @@ export default function ApplicationRow({ application, onUpdate }) {
       await onUpdate(application.id, { cover_letter: draftLetter })
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleRegenerate() {
+    setRegenerating(true)
+    try {
+      const updated = await onRegenerate(application.id, instructions)
+      setDraftLetter(updated.cover_letter)
+      setInstructions('')
+    } finally {
+      setRegenerating(false)
     }
   }
 
@@ -102,6 +115,28 @@ export default function ApplicationRow({ application, onUpdate }) {
             >
               {saving ? 'Saving…' : 'Save letter'}
             </button>
+          </div>
+
+          <div className="mt-5 border-t border-line pt-4">
+            <div className="mb-2 font-mono text-[11px] tracking-wide text-ink-faint">
+              REGENERATE WITH INSTRUCTIONS
+            </div>
+            <textarea
+              value={instructions}
+              onChange={(e) => setInstructions(e.target.value)}
+              rows={2}
+              placeholder="e.g. mention my open-source contributions, make the tone more enthusiastic…"
+              className="w-full rounded border border-line p-3 font-body text-sm text-ink"
+            />
+            <div className="mt-3 flex justify-end">
+              <button
+                onClick={handleRegenerate}
+                disabled={regenerating || !instructions.trim()}
+                className="rounded-[5px] border border-line px-4 py-2 font-mono text-xs text-ink-dim disabled:opacity-40"
+              >
+                {regenerating ? 'Regenerating…' : 'Regenerate letter'}
+              </button>
+            </div>
           </div>
         </div>
       )}

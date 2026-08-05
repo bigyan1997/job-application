@@ -31,6 +31,13 @@ export function updateApplication(id, fields) {
   })
 }
 
+export function regenerateCoverLetter(id, instructions) {
+  return request(`/applications/${id}/regenerate_cover_letter/`, {
+    method: 'POST',
+    body: JSON.stringify({ instructions }),
+  })
+}
+
 export function listResumes() {
   return request('/resumes/')
 }

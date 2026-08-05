@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { listApplications, updateApplication } from '../api'
+import { listApplications, updateApplication, regenerateCoverLetter } from '../api'
 import ApplicationRow from '../components/ApplicationRow'
 
 const TABS = [
@@ -45,6 +45,13 @@ export default function Dashboard() {
   async function handleUpdate(id, fields) {
     const updated = await updateApplication(id, fields)
     setApplications((prev) => prev.map((a) => (a.id === id ? updated : a)))
+    return updated
+  }
+
+  async function handleRegenerate(id, instructions) {
+    const updated = await regenerateCoverLetter(id, instructions)
+    setApplications((prev) => prev.map((a) => (a.id === id ? updated : a)))
+    return updated
   }
 
   const stats = computeStats(applications)
@@ -90,7 +97,12 @@ export default function Dashboard() {
       ) : (
         <div className="border-t border-line">
           {applications.map((application) => (
-            <ApplicationRow key={application.id} application={application} onUpdate={handleUpdate} />
+            <ApplicationRow
+              key={application.id}
+              application={application}
+              onUpdate={handleUpdate}
+              onRegenerate={handleRegenerate}
+            />
           ))}
         </div>
       )}
