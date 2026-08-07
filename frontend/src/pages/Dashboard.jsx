@@ -1,5 +1,11 @@
 import { useEffect, useState, useCallback } from 'react'
-import { listApplications, updateApplication, regenerateCoverLetter, listJobSearchProfiles } from '../api'
+import {
+  listApplications,
+  updateApplication,
+  regenerateCoverLetter,
+  listJobSearchProfiles,
+  searchNow,
+} from '../api'
 import ApplicationRow from '../components/ApplicationRow'
 import { timeAgo } from '../utils/time'
 
@@ -50,6 +56,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [profile, setProfile] = useState(null)
+  const [searching, setSearching] = useState(false)
 
   const load = useCallback(async (filters) => {
     setLoading(true)
@@ -84,6 +91,25 @@ export default function Dashboard() {
     return updated
   }
 
+  async function handleSearchNow() {
+    if (!profile) return
+    setSearching(true)
+    try {
+      await searchNow(profile.id)
+      // The search itself (Adzuna + RemoteOK) finishes in a few seconds;
+      // matching against each new listing keeps running in the background
+      // after that. This refresh just catches the "last search" timestamp
+      // and whatever's matched by the time it fires — not a full completion
+      // tracker for the background work.
+      setTimeout(async () => {
+        const [profiles] = await Promise.all([listJobSearchProfiles(), load({ status: activeTab, ordering: sortBy, minScore, atsType })])
+        setProfile(profiles[0] ?? null)
+      }, 8000)
+    } finally {
+      setSearching(false)
+    }
+  }
+
   const stats = computeStats(applications)
 
   return (
@@ -103,6 +129,15 @@ export default function Dashboard() {
               'Job Application Automation'
             )}
           </div>
+          {profile && (
+            <button
+              onClick={handleSearchNow}
+              disabled={searching}
+              className="mt-3 rounded-[5px] border border-line px-3.5 py-1.5 font-mono text-[11px] text-ink-dim hover:text-ink disabled:opacity-40"
+            >
+              {searching ? 'Starting search…' : 'Search now'}
+            </button>
+          )}
         </div>
         <div className="flex gap-8">
           <Stat value={stats.found} label="found" />

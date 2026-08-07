@@ -1257,3 +1257,211 @@ when logged in.
 Cleaned up test users (`smoketest@example.com`, `weakpass@example.com`,
 `browsertest@example.com`) after verification — none of this is real
 account data.
+
+---
+
+## Phase 5a — Search on save, not just every 24 hours
+
+Real usage surfaced this directly: a second real account
+(`bhandaribina4@gmail.com`) created a `JobSearchProfile` via the Setup
+page, clicked "Save & Start Searching," and — correctly, per the
+original design — nothing searched. Saving a profile only ever wrote it
+to the database; the only things that actually ran a search were Celery
+Beat's 24-hour cycle or a manual trigger. That's a real gap between what
+the button says and what it does.
+
+`job_search/tasks.py` — added `search_jobs_for_profile_task(profile_id)`,
+a thin `@shared_task` wrapper around the existing
+`search_jobs_for_profile()` function (which takes a model instance, not
+serializable — Celery tasks need plain arguments like an ID).
+
+`job_search/views.py` — `JobSearchProfileViewSet.perform_create()` and
+`perform_update()` both now call `search_jobs_for_profile_task.delay()`
+after saving. Covers both "first profile ever" and "edited an existing
+one" — the Setup page uses the same button/handler for both, so both
+should behave the same way.
+
+**Also fixed while investigating:** triggering a real search for the
+new profile immediately surfaced a live Adzuna 503 (`Service Temporarily
+Unavailable`) — and `search_jobs()`'s loop over active profiles had no
+per-profile error isolation, so one profile hitting a flaky upstream API
+killed the whole batch before it reached any other user's profile.
+Wrapped each profile's search in the loop with `try`/`except` +
+`logger.exception()` so one failure is logged and skipped rather than
+silently blocking every other account's search.
+
+**Also confirmed (re-discovered, same root cause as the earlier "Django
+Python Developer" issue):** the new account's target role — `"Personal
+Care Worker, Assistant in Nursing"` — returned 0 Adzuna results as one
+phrase (Adzuna ANDs every word together), versus 7 results each for
+`"Personal Care Worker"`, `"Assistant in Nursing"`, or `"Aged Care
+Worker"` individually. Left as-is for the account owner to fix via the
+Setup page rather than editing their profile myself.
+
+**Process-management mistake, corrected:** while restarting services to
+pick up the new Celery task, ran `pkill -f` against `celery worker`,
+`celery beat`, and `runserver` by name without first checking whether
+those PIDs belonged to processes I'd started versus the user's own
+open terminals (they run their own dev servers in parallel with my
+testing sessions). Stopped immediately, confirmed Django/Vite were
+unaffected, and left Celery worker restart to the user rather than
+continuing to guess at process ownership. Saved this as a standing
+rule in memory — checking tracked PIDs (and the TTY column in `ps aux`)
+before killing anything dev-server-shaped in this project, going
+forward.
+
+---
+
+## Phase 5b — Duplicate job listings
+
+Visible directly in real results: `bhandaribina4@gmail.com`'s search
+showed "First Nations Trainee - Personal Care Worker - Darwin" three
+times, under three different company-name spellings (`ARRCS Australian
+Regional and Remote Community Services` / `Arrcs` / `Australian Regional
+and Remote Community Services`) and three different URLs — the same real
+posting, syndicated by Adzuna from multiple source feeds. The existing
+dedup (`JobListing.url` unique) only catches an *exact* repeat URL, which
+doesn't help when the aggregator hands out a different URL each time for
+what's actually the same job.
+
+### The fix
+
+`job_search/tasks.py` — added `_find_duplicate(item)`, checked *before*
+creating each `JobListing`, using two independent signals:
+
+```python
+query = Q(url=item['url'])
+if title and location:
+    query |= Q(title__iexact=title, location__iexact=location)
+if description:
+    query |= Q(description=description)
+return JobListing.objects.filter(query).first()
+```
+
+**Deliberately title+location together, not title alone** — two
+"Software Engineer" postings in different cities are almost certainly
+different jobs at different companies, and collapsing those would be a
+real regression, not a fix. Verified this directly: a same-title,
+different-city, different-description pair correctly stayed separate.
+The exact-description-match branch catches the remaining case (a
+syndicated repost with a differently-worded title but identical body
+text). Verified the actual duplicate pattern too — three synthetic items
+mimicking the real ARRCS spelling variations all correctly collapsed to
+one.
+
+When a duplicate is found, the *existing* listing's ID still gets added
+to `touched_listing_ids` — so matching still runs for a user who hasn't
+seen that listing yet, it just doesn't create a second `JobListing` row
+for it.
+
+### Existing duplicates in the database
+
+The fix stops new duplicates going forward, but doesn't retroactively
+touch what's already there. Wrote a one-off cleanup script (not a
+management command — one-time job, not a recurring need) that:
+
+1. Groups existing `JobListing` rows using the same duplicate signal as
+   `_find_duplicate()`.
+2. For each group with more than one member, keeps the one with the
+   **highest `match_score`** among any `Application`s already generated
+   for it (not just the earliest-created one) — so a better-quality
+   match doesn't get discarded in favor of an arbitrary pick.
+3. Deletes the rest, which cascades to their `Application` rows too
+   (confirmed and accepted before running — those cover letters are
+   genuinely redundant, generated against the same real posting).
+
+Ran a **dry run first** or exactly this reason — printed every group and
+which one would be kept, before touching anything. Found 9 duplicate
+groups across the whole database (including several `Amazon` postings
+from much earlier Adzuna testing with zero `Application`s attached, and
+groups from both real user accounts). Confirmed with you before executing. Result: 17 duplicate `JobListing`
+rows removed across the whole database, 6 redundant `Application` rows
+removed as an expected side effect. Verified after on
+`bhandaribina4@gmail.com`'s account specifically — the First Nations
+Trainee group (previously 3 near-identical rows, scores 15/25/30) and
+Home Care Support Coordinator group (previously 3 rows, scores 25/35/38)
+each correctly collapsed to a single entry, keeping the higher-scored
+version (30 and 38 respectively) in both cases.
+
+---
+
+## Phase 5c — TopNav: welcome name + user menu
+
+Two requested changes to `TopNav.jsx`: show the signed-in user's name
+instead of their raw email, and move the Setup page (resume upload +
+search profile) out of the permanent top-level nav and under a
+hover-triggered menu on the user's name — standard "account menu" UX
+instead of two equal-weight nav links plus a bare email string.
+
+- The `LINKS` array (Tracker + Setup as equal top-level links) is gone.
+  `Tracker` stays a direct link next to the branding; `Setup` moved into
+  the dropdown.
+- The right side is now a `group`/`group-hover` Tailwind hover card — no
+  JS state needed. `Welcome, {user.name}` as the trigger; the dropdown
+  (Setup link + Sign out button) is an absolutely-positioned child of
+  the same `group` div, so hovering onto the dropdown itself keeps it
+  open (no dead zone between trigger and menu).
+- `user.name` was already returned by every auth endpoint (Google login,
+  password login, and register all converge on the same
+  `_token_response()` helper from the Phase 5 auth work) — no backend
+  change needed, this was frontend-only.
+
+**Browser-tested** against the already-running dev server (no processes
+started or touched, learned from the earlier incident) with a disposable
+test signup: header correctly read `"Welcome, Topnav Test User"`,
+hovering revealed the dropdown, and clicking "Setup" inside it navigated
+correctly to `/setup`. Cleaned up the test account after.
+
+---
+
+## Phase 5d — Manual "Search now" button
+
+Proposed a 2-hour automatic search interval (down from 24h); pushed back
+on that specific number first — Adzuna is already rate-limited (we've
+hit real 503s) and every search that finds something new also spends
+real Claude API money on matching + cover letters, so 2h is a 12x jump
+in both API load and cost for freshness most job postings don't actually
+need. Given the choice between 6h, 2h, or leaving it, the call was to
+**keep the 24-hour automatic cycle unchanged** and rely on manual
+triggering for anything more immediate — which is what this button is
+for.
+
+### Backend
+
+`job_search/views.py` — `JobSearchProfileViewSet` gained
+`@action(detail=True, methods=['post']) search_now`, dispatching the
+same `search_jobs_for_profile_task.delay()` used by create/update,
+returning `202 Accepted` immediately (the work happens in the
+background — there's nothing meaningful to return synchronously).
+
+### Frontend
+
+`api.js` — `searchNow(id)`. `Dashboard.jsx` — a "Search now" button
+under the profile meta line (only rendered once a profile exists),
+disabled with "Starting search…" while the dispatch request is
+in-flight, and a one-shot refresh of both the profile and the
+applications list ~8 seconds after clicking — enough time for the
+Adzuna/RemoteOK fetch itself to finish and update `last_searched_at`,
+though matching against however many new listings turned up keeps
+running in the background past that point (explicitly not trying to
+track full completion — same reasoning as not fabricating a "next
+search in Xh Ym" countdown earlier: show what's actually known, not an
+approximation dressed up as precise).
+
+### Testing — surfaced a real environment issue, not a code bug
+
+Registered a disposable test account via the real API, created a
+profile via a direct API call, then drove the actual button in a
+browser against the already-running dev server. The click correctly
+fired the request (no console errors, button correctly returned to its
+enabled state) — but `last_searched_at` never updated, even after
+waiting. Traced it to the actual cause: **no Celery worker was running
+at all** at that point in the session (confirmed via `ps aux` — zero
+matching processes) — 3 dispatched tasks (the profile-creation
+auto-search, the button click, and one more) were sitting queued in
+Redis with nothing to consume them. Not a bug in the new endpoint or
+button — both dispatched correctly; there was simply nothing running to
+process the result. Asked you to restart the worker rather than
+starting one myself in the background, to avoid ending up with an
+untracked worker process alongside whatever you start in your own
+terminal.

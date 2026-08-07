@@ -113,3 +113,7 @@ export function updateJobSearchProfile(id, fields) {
     body: JSON.stringify(fields),
   })
 }
+
+export function searchNow(id) {
+  return request(`/job-search-profiles/${id}/search_now/`, { method: 'POST' })
+}
